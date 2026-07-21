@@ -242,8 +242,16 @@ Use one transition sequence; do not improvise a second runner or render path:
 6. Run the paid and downstream stages, then write their final checkpoints.
 
 For `preview_then_avatar`, the cheap run ends at `compose` with the complete
-placeholder preview. After exact avatar approval, re-run `assets`, `edit` and
-`compose` for the final. There is no second creative gate in this profile.
+placeholder preview. The post-approval transition is machine-enforced, not a
+convention: when `record_checkpoint_approval(...)` succeeds, the completed
+placeholder checkpoints for the stages listed in the profile's
+`post_approval_rerun` (`assets`, `edit`) are archived to `history/` and
+removed, so the **same** `get_next_stage(...)` loop resumes at `assets` and
+the paid avatar pass replaces the placeholder. The approved `compose`
+checkpoint stays `awaiting_human` — it carries the resume token that
+`assert_checkpoint_approved_for_resume(...)` verifies immediately before the
+first paid avatar call. There is no second creative gate in this profile, and
+no second runner.
 
 This workspace evidence is tamper-evident, not a security boundary against a
 process with root write access. Malice-resistant deployments must isolate paid
