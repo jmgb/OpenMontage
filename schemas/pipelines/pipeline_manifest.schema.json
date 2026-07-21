@@ -133,6 +133,11 @@
           "stage_overrides": {
             "type": "object",
             "additionalProperties": { "type": "boolean" }
+          },
+          "post_approval_rerun": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Stages whose completed placeholder checkpoints are superseded when the gate is approved, so the deterministic resume loop re-runs them for the paid pass. Stage names are validated against the pipeline's declared stages at profile resolution."
           }
         },
         "additionalProperties": false
