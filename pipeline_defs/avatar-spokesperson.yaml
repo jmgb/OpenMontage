@@ -26,6 +26,13 @@ approval_profiles:
       edit: false
       compose: true
       publish: false
+    # After the compose preview is approved, the placeholder assets/edit
+    # checkpoints are superseded (archived to history/) so get_next_stage
+    # resumes at assets and the paid avatar pass replaces the placeholder.
+    post_approval_rerun:
+      - assets
+      - edit
+      - compose
 
 orchestration:
   mode: executive-producer

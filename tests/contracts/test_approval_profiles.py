@@ -13,10 +13,13 @@ import json
 import pytest
 
 from lib.checkpoint import (
+    _resolve_approval_profile,
     assert_checkpoint_approved_for_resume,
     CheckpointValidationError,
     checkpoint_resume_token,
+    get_next_stage,
     init_project,
+    read_checkpoint,
     record_checkpoint_approval,
     write_checkpoint,
 )
@@ -251,6 +254,217 @@ def test_paid_resume_requires_the_exact_expected_decision(tmp_path):
             expected_resume_token=token,
             expected_decision="APROBAR AVATAR",
         )
+
+
+def test_write_checkpoint_rejects_profile_not_selected_by_project(tmp_path):
+    """A per-call profile must not opt a default project out of its gates."""
+    init_project(
+        "default-avatar",
+        title="Default avatar",
+        pipeline_type="avatar-spokesperson",
+        pipeline_dir=tmp_path,
+    )
+
+    with pytest.raises(CheckpointValidationError, match="cannot override"):
+        write_checkpoint(
+            tmp_path,
+            "default-avatar",
+            "idea",
+            "completed",
+            {"brief": sample_artifact("brief")},
+            pipeline_type="avatar-spokesperson",
+            approval_profile=PROFILE,
+        )
+    assert not (tmp_path / "default-avatar" / "checkpoint_idea.json").exists()
+
+    # Same bypass without any project marker at all: also rejected.
+    with pytest.raises(CheckpointValidationError, match="cannot override"):
+        write_checkpoint(
+            tmp_path,
+            "no-marker",
+            "idea",
+            "completed",
+            {"brief": sample_artifact("brief")},
+            pipeline_type="avatar-spokesperson",
+            approval_profile=PROFILE,
+        )
+
+
+def test_write_checkpoint_rejects_profile_differing_from_marker(tmp_path):
+    _init_profiled_project(tmp_path)
+
+    with pytest.raises(CheckpointValidationError, match="cannot override"):
+        write_checkpoint(
+            tmp_path,
+            "brand-short",
+            "idea",
+            "completed",
+            {"brief": sample_artifact("brief")},
+            pipeline_type="avatar-spokesperson",
+            approval_profile="some-other-profile",
+        )
+
+
+def test_write_checkpoint_accepts_explicit_profile_matching_marker(tmp_path):
+    _init_profiled_project(tmp_path)
+
+    path = write_checkpoint(
+        tmp_path,
+        "brand-short",
+        "idea",
+        "completed",
+        {"brief": sample_artifact("brief")},
+        pipeline_type="avatar-spokesperson",
+        approval_profile=PROFILE,
+    )
+    checkpoint = json.loads(path.read_text())
+    assert checkpoint["approval_profile"] == PROFILE
+    assert checkpoint["human_approval_required"] is False
+
+
+def test_stage_override_typo_fails_closed():
+    """A typo'd stage name would silently drop the gate it meant to set."""
+    manifest = {
+        "stages": [{"name": "idea"}, {"name": "compose"}],
+        "approval_profiles": {
+            "typo-profile": {
+                "stage_overrides": {"idea": False, "comopse": True},
+            },
+        },
+    }
+
+    with pytest.raises(CheckpointValidationError, match="comopse"):
+        _resolve_approval_profile(manifest, "avatar-spokesperson", "typo-profile")
+
+
+def test_post_approval_rerun_typo_fails_closed():
+    manifest = {
+        "stages": [{"name": "assets"}, {"name": "compose"}],
+        "approval_profiles": {
+            "typo-profile": {
+                "stage_overrides": {"compose": True},
+                "post_approval_rerun": ["asets", "compose"],
+            },
+        },
+    }
+
+    with pytest.raises(CheckpointValidationError, match="asets"):
+        _resolve_approval_profile(manifest, "avatar-spokesperson", "typo-profile")
+
+
+def test_all_manifest_approval_profiles_reference_declared_stages():
+    import jsonschema
+
+    from lib.pipeline_loader import list_pipelines, load_pipeline
+
+    for name in list_pipelines():
+        try:
+            manifest = load_pipeline(name)
+        except jsonschema.ValidationError:
+            # Generic manifest validity is covered by the manifest contract
+            # suite; this test only guards profile/stage consistency.
+            continue
+        for profile_name in (manifest.get("approval_profiles") or {}):
+            _resolve_approval_profile(manifest, name, profile_name)
+
+
+def test_post_approval_transition_reruns_placeholder_stages(tmp_path):
+    """After approval, the deterministic loop must reach the paid avatar pass.
+
+    The cheap run leaves assets/edit completed with placeholder content and
+    compose awaiting approval. Recording the approval must supersede those
+    placeholder checkpoints so get_next_stage routes back to assets, instead
+    of re-rendering the placeholder at compose forever.
+    """
+    _init_profiled_project(tmp_path)
+
+    def _artifact(name):
+        artifact = sample_artifact(name)
+        if name == "edit_decisions":
+            artifact["render_runtime"] = "ffmpeg"
+        return artifact
+
+    cheap_pass = [
+        ("idea", "brief"),
+        ("script", "script"),
+        ("scene_plan", "scene_plan"),
+        ("assets", "asset_manifest"),
+        ("edit", "edit_decisions"),
+    ]
+    for stage, artifact in cheap_pass:
+        write_checkpoint(
+            tmp_path,
+            "brand-short",
+            stage,
+            "completed",
+            {artifact: _artifact(artifact)},
+            pipeline_type="avatar-spokesperson",
+        )
+    path = write_checkpoint(
+        tmp_path,
+        "brand-short",
+        "compose",
+        "awaiting_human",
+        {"render_report": sample_artifact("render_report")},
+        pipeline_type="avatar-spokesperson",
+        metadata={"preview_path": "renders/structure.mp4"},
+    )
+    token = checkpoint_resume_token(json.loads(path.read_text()))
+    assert get_next_stage(tmp_path, "brand-short", "avatar-spokesperson") == "compose"
+
+    record_checkpoint_approval(
+        tmp_path,
+        "brand-short",
+        "compose",
+        expected_resume_token=token,
+        approval_evidence={
+            "decision": "APROBAR AVATAR",
+            "source_message_id": "wamid.rerun",
+            "timestamp": "2026-07-16T01:00:00+00:00",
+        },
+    )
+
+    # Placeholder checkpoints are superseded (archived, not destroyed) ...
+    assert get_next_stage(tmp_path, "brand-short", "avatar-spokesperson") == "assets"
+    assert read_checkpoint(tmp_path, "brand-short", "assets") is None
+    assert read_checkpoint(tmp_path, "brand-short", "edit") is None
+    history = tmp_path / "brand-short" / "history"
+    assert list(history.glob("checkpoint_assets_*.json"))
+    assert list(history.glob("checkpoint_edit_*.json"))
+
+    # ... while the approved compose checkpoint keeps the resume token the
+    # paid adapter verifies immediately before spend.
+    compose = read_checkpoint(tmp_path, "brand-short", "compose")
+    assert compose["status"] == "awaiting_human"
+    assert_checkpoint_approved_for_resume(
+        tmp_path,
+        "brand-short",
+        "compose",
+        expected_resume_token=token,
+        expected_decision="APROBAR AVATAR",
+    )
+
+    # The governed runner re-runs assets -> edit -> compose with the real
+    # avatar; the approved evidence authorizes the final compose write.
+    for stage, artifact in (("assets", "asset_manifest"), ("edit", "edit_decisions")):
+        write_checkpoint(
+            tmp_path,
+            "brand-short",
+            stage,
+            "completed",
+            {artifact: _artifact(artifact)},
+            pipeline_type="avatar-spokesperson",
+        )
+    write_checkpoint(
+        tmp_path,
+        "brand-short",
+        "compose",
+        "completed",
+        {"render_report": sample_artifact("render_report")},
+        pipeline_type="avatar-spokesperson",
+        human_approved=True,
+    )
+    assert get_next_stage(tmp_path, "brand-short", "avatar-spokesperson") == "publish"
 
 
 def test_render_report_accepts_a_content_bound_output_hash():

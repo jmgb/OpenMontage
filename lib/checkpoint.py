@@ -189,6 +189,26 @@ def _resolve_approval_profile(
             f"Unknown approval_profile {approval_profile!r} for pipeline "
             f"{pipeline_type!r}; available profiles: {available}"
         )
+
+    # A typo'd stage name in a profile would be silently ignored downstream
+    # and drop the gate the profile intended — fail closed instead.
+    declared = {
+        stage.get("name")
+        for stage in manifest.get("stages", [])
+        if isinstance(stage, dict)
+    }
+    overrides = profile.get("stage_overrides", {})
+    rerun = profile.get("post_approval_rerun", [])
+    unknown = sorted(
+        {key for key in overrides if key not in declared}
+        | {key for key in rerun if key not in declared}
+    )
+    if unknown:
+        raise CheckpointValidationError(
+            f"approval_profile {approval_profile!r} in pipeline {pipeline_type!r} "
+            f"references unknown stages: {unknown}. Declared stages: "
+            f"{sorted(s for s in declared if s)}"
+        )
     return profile
 
 
@@ -417,10 +437,23 @@ def write_checkpoint(
             marker = None
     if not pipeline_type and isinstance(marker, dict) and marker.get("pipeline_type"):
         pipeline_type = marker["pipeline_type"]
-    if not approval_profile and isinstance(marker, dict):
-        marker_profile = marker.get("approval_profile")
-        if isinstance(marker_profile, str) and marker_profile:
-            approval_profile = marker_profile
+    # The persisted project selection is authoritative for approval profiles.
+    # Accepting a per-call profile the project never selected would let any
+    # stage caller opt itself out of the project's default gates.
+    marker_profile = marker.get("approval_profile") if isinstance(marker, dict) else None
+    if not (isinstance(marker_profile, str) and marker_profile):
+        marker_profile = None
+    if approval_profile:
+        if approval_profile != marker_profile:
+            raise CheckpointValidationError(
+                f"approval_profile {approval_profile!r} was passed for project "
+                f"{project_id!r} but {PROJECT_MARKER_FILENAME} records "
+                f"{marker_profile!r}. Profiles are selected once at "
+                f"init_project(); write_checkpoint cannot override the "
+                f"persisted selection."
+            )
+    else:
+        approval_profile = marker_profile
 
     valid_stages = (
         set(get_pipeline_stages(pipeline_type)) if pipeline_type
@@ -592,7 +625,7 @@ def record_checkpoint_approval(
     metadata = dict(checkpoint.get("metadata") or {})
     metadata["approval_evidence"] = approval_evidence
     metadata["approved_resume_token"] = actual_token
-    return write_checkpoint(
+    approved_path = write_checkpoint(
         pipeline_dir,
         project_id,
         stage,
@@ -608,6 +641,65 @@ def record_checkpoint_approval(
         metadata=metadata,
         approval_profile=checkpoint.get("approval_profile"),
     )
+    _supersede_post_approval_rerun_checkpoints(
+        pipeline_dir,
+        project_id,
+        approved_stage=stage,
+        pipeline_type=checkpoint.get("pipeline_type"),
+        approval_profile=checkpoint.get("approval_profile"),
+    )
+    return approved_path
+
+
+def _supersede_post_approval_rerun_checkpoints(
+    pipeline_dir: Path,
+    project_id: str,
+    *,
+    approved_stage: str,
+    pipeline_type: Optional[str],
+    approval_profile: Optional[str],
+) -> list[str]:
+    """Route the deterministic resume loop into the profile's paid re-run.
+
+    A profile such as ``preview_then_avatar`` completes cheap placeholder
+    passes of ``assets``/``edit`` before the gated ``compose`` preview. Once
+    the human approves that preview, those placeholder checkpoints must stop
+    counting as done — otherwise ``get_next_stage`` resumes at the approved
+    stage and re-renders the placeholder instead of running the paid pass.
+    Each superseded checkpoint is archived to ``history/`` first, then removed,
+    so the same governed runner re-executes the stages listed in the profile's
+    ``post_approval_rerun``. The approved awaiting checkpoint itself is kept:
+    it carries the resume token the paid adapter verifies before spend.
+    """
+    if not approval_profile or not pipeline_type or pipeline_type == "unknown":
+        return []
+    from lib.pipeline_loader import load_pipeline_readonly
+    try:
+        manifest = load_pipeline_readonly(pipeline_type)
+    except Exception as exc:
+        raise CheckpointValidationError(
+            f"Cannot resolve approval_profile {approval_profile!r} for the "
+            f"post-approval transition of pipeline {pipeline_type!r}"
+        ) from exc
+    profile = _resolve_approval_profile(manifest, pipeline_type, approval_profile)
+    superseded: list[str] = []
+    for prior_stage in profile.get("post_approval_rerun", []):
+        if prior_stage == approved_stage:
+            continue
+        path = _checkpoint_path(pipeline_dir, project_id, prior_stage)
+        if not path.exists():
+            continue
+        try:
+            with open(path) as f:
+                existing = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if existing.get("status") != "completed":
+            continue
+        _archive_superseded_checkpoint(path, prior_stage)
+        path.unlink()
+        superseded.append(prior_stage)
+    return superseded
 
 
 def assert_checkpoint_approved_for_resume(
