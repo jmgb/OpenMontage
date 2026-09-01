@@ -36,9 +36,44 @@ def _init_profiled_project(tmp_path):
         title="Brand short",
         pipeline_type="avatar-spokesperson",
         pipeline_dir=tmp_path,
-        style_playbook="client-playbook",
+        style_playbook="clean-professional",
         approval_profile=PROFILE,
     )
+
+
+_CHEAP_PASS = (
+    ("idea", "brief"),
+    ("script", "script"),
+    ("scene_plan", "scene_plan"),
+    ("assets", "asset_manifest"),
+    ("edit", "edit_decisions"),
+)
+
+
+def _cheap_artifact(name):
+    artifact = sample_artifact(name)
+    if name == "edit_decisions":
+        artifact["render_runtime"] = "ffmpeg"
+    return artifact
+
+
+def _complete_cheap_pass(tmp_path, through="edit"):
+    """Escribe la pasada barata completa hasta `through` (incluida).
+
+    Los prerrequisitos de etapa exigen predecesores completados antes de
+    escribir un checkpoint avanzado.
+    """
+    for stage, artifact in _CHEAP_PASS:
+        write_checkpoint(
+            tmp_path,
+            "brand-short",
+            stage,
+            "completed",
+            {artifact: _cheap_artifact(artifact)},
+            pipeline_type="avatar-spokesperson",
+        )
+        if stage == through:
+            return
 
 
 def test_profile_auto_completes_cheap_stages_without_weakening_default(tmp_path):
@@ -76,14 +111,9 @@ def test_profile_auto_completes_cheap_stages_without_weakening_default(tmp_path)
 def test_profile_keeps_structure_preview_compose_stage_gated(tmp_path):
     _init_profiled_project(tmp_path)
 
-    write_checkpoint(
-        tmp_path,
-        "brand-short",
-        "assets",
-        "completed",
-        {"asset_manifest": sample_artifact("asset_manifest")},
-        pipeline_type="avatar-spokesperson",
-    )
+    # La pasada barata (assets incluida) se escribe sin aprobación: el perfil
+    # solo mantiene el gate en compose.
+    _complete_cheap_pass(tmp_path)
     with pytest.raises(CheckpointValidationError, match="GATE VIOLATION"):
         write_checkpoint(
             tmp_path,
@@ -109,6 +139,7 @@ def test_unknown_profile_fails_closed(tmp_path):
 
 def test_resume_token_binds_explicit_human_approval_to_awaiting_checkpoint(tmp_path):
     _init_profiled_project(tmp_path)
+    _complete_cheap_pass(tmp_path)
     path = write_checkpoint(
         tmp_path,
         "brand-short",
@@ -152,6 +183,7 @@ def test_resume_token_binds_explicit_human_approval_to_awaiting_checkpoint(tmp_p
 
 def test_resume_rejects_stale_token(tmp_path):
     _init_profiled_project(tmp_path)
+    _complete_cheap_pass(tmp_path)
     write_checkpoint(
         tmp_path,
         "brand-short",
@@ -177,6 +209,7 @@ def test_resume_rejects_stale_token(tmp_path):
 
 def test_approval_evidence_requires_message_identity_and_timestamp(tmp_path):
     _init_profiled_project(tmp_path)
+    _complete_cheap_pass(tmp_path)
     path = write_checkpoint(
         tmp_path,
         "brand-short",
@@ -199,6 +232,7 @@ def test_approval_evidence_requires_message_identity_and_timestamp(tmp_path):
 
 def test_approval_evidence_rejects_invalid_timestamp(tmp_path):
     _init_profiled_project(tmp_path)
+    _complete_cheap_pass(tmp_path)
     path = write_checkpoint(
         tmp_path,
         "brand-short",
@@ -225,6 +259,7 @@ def test_approval_evidence_rejects_invalid_timestamp(tmp_path):
 
 def test_paid_resume_requires_the_exact_expected_decision(tmp_path):
     _init_profiled_project(tmp_path)
+    _complete_cheap_pass(tmp_path)
     path = write_checkpoint(
         tmp_path,
         "brand-short",

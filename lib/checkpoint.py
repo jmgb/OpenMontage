@@ -360,6 +360,7 @@ def _enforce_stage_prerequisites(
     pipeline_type: str | None,
     stage: str,
     status: str,
+    approval_profile: str | None = None,
 ) -> None:
     """Require completed, approved predecessors before advancing a stage.
 
@@ -401,9 +402,9 @@ def _enforce_stage_prerequisites(
         if checkpoint.get("status") != "completed":
             incomplete.append(predecessor)
             continue
-        if _stage_requires_approval(pipeline_type, predecessor) and not checkpoint.get(
-            "human_approved"
-        ):
+        if _stage_requires_approval(
+            pipeline_type, predecessor, approval_profile=approval_profile
+        ) and not checkpoint.get("human_approved"):
             unapproved.append(predecessor)
 
     if incomplete or unapproved:
@@ -601,6 +602,7 @@ def write_checkpoint(
         pipeline_type,
         stage,
         status,
+        approval_profile=approval_profile,
     )
 
     checkpoint = {
@@ -788,7 +790,7 @@ def _supersede_post_approval_rerun_checkpoints(
         if not path.exists():
             continue
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 existing = json.load(f)
         except (json.JSONDecodeError, OSError):
             continue
