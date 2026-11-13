@@ -209,10 +209,10 @@ if (cmd === "overlay") {
         ],
       },
     ],
-    generationConfig: { temperature: 0, response_mime_type: "application/json" },
+    generationConfig: { response_mime_type: "application/json" },
   };
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${key}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-4-hydrogen:generateContent?key=${key}`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
   );
   const t = (await res.json()).candidates[0].content.parts[0].text;
