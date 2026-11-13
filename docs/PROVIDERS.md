@@ -1638,3 +1638,19 @@ migration guidance; Vertex and aggregator routes are handled separately.
 Eleven v4 now uses the dialogue contract and Turbo uses its WebSocket transport.
 New provider availability is credential-based, not a live entitlement check.
 Pricing requires current quotes except the explicitly dated HeyGen free promotion.
+
+## Gemini text-helper migration (2026-11-13)
+
+The motion-graphics grounding helper, `locate.mjs auto`, uses
+`gemini-4-hydrogen` for image-to-JSON object detection. It preserves image
+input and JSON output and omits the ignored temperature parameter. Flash Lite,
+image-generation, video and TTS model choices remain separate.
+
+The bundled ElevenLabs agent examples retain their provider-specific IDs:
+Hydrogen is not listed in the [native ElevenAgents model table](https://elevenlabs.io/docs/eleven-agents/customization/llm)
+as of this update. Verify native support or configure a supported custom LLM
+endpoint before changing those templates; replacing their IDs blindly would
+claim compatibility the provider has not documented.
+
+- [ ] Migrate the bundled ElevenLabs agent examples when native Hydrogen support
+  is available or a compatible custom endpoint has been selected.
